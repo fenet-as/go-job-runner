@@ -111,6 +111,8 @@ func (q *Queries) GetJobByID(ctx context.Context, id int64) (Job, error) {
 
 const listJobs = `-- name: ListJobs :many
 SELECT id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at FROM jobs
+WHERE ($3::job_status IS NULL OR status = $3)
+  AND ($4::text IS NULL OR type = $4)
 ORDER BY id DESC
 LIMIT $1 OFFSET $2
 `
@@ -118,56 +120,17 @@ LIMIT $1 OFFSET $2
 type ListJobsParams struct {
 	Limit  int32
 	Offset int32
+	Status NullJobStatus
+	Type   pgtype.Text
 }
 
 func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, error) {
-	rows, err := q.db.Query(ctx, listJobs, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Job
-	for rows.Next() {
-		var i Job
-		if err := rows.Scan(
-			&i.ID,
-			&i.Type,
-			&i.Payload,
-			&i.Status,
-			&i.Attempts,
-			&i.MaxAttempts,
-			&i.RunAt,
-			&i.LockedAt,
-			&i.LockedBy,
-			&i.LastError,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listJobsByStatus = `-- name: ListJobsByStatus :many
-SELECT id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at FROM jobs
-WHERE status = $1
-ORDER BY id DESC
-LIMIT $2 OFFSET $3
-`
-
-type ListJobsByStatusParams struct {
-	Status JobStatus
-	Limit  int32
-	Offset int32
-}
-
-func (q *Queries) ListJobsByStatus(ctx context.Context, arg ListJobsByStatusParams) ([]Job, error) {
-	rows, err := q.db.Query(ctx, listJobsByStatus, arg.Status, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listJobs,
+		arg.Limit,
+		arg.Offset,
+		arg.Status,
+		arg.Type,
+	)
 	if err != nil {
 		return nil, err
 	}
