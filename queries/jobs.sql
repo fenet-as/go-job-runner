@@ -18,14 +18,10 @@ WHERE id = $1;
 
 -- name: ListJobs :many
 SELECT * FROM jobs
+WHERE (sqlc.narg('status')::job_status IS NULL OR status = sqlc.narg('status'))
+  AND (sqlc.narg('type')::text IS NULL OR type = sqlc.narg('type'))
 ORDER BY id DESC
 LIMIT $1 OFFSET $2;
-
--- name: ListJobsByStatus :many
-SELECT * FROM jobs
-WHERE status = $1
-ORDER BY id DESC
-LIMIT $2 OFFSET $3;
 
 -- name: CancelJob :one
 DELETE FROM jobs
