@@ -151,6 +151,42 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, erro
 	return i, err
 }
 
+const failJob = `-- name: FailJob :one
+UPDATE jobs
+SET status = 'failed',
+    last_error = $2::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+type FailJobParams struct {
+	ID        int64
+	LastError string
+}
+
+func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, failJob, arg.ID, arg.LastError)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getJobByID = `-- name: GetJobByID :one
 SELECT id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at FROM jobs
 WHERE id = $1

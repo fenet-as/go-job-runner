@@ -52,3 +52,13 @@ SET status = 'succeeded',
     updated_at = now()
 WHERE id = $1 AND status = 'running'
 RETURNING *;
+
+-- name: FailJob :one
+UPDATE jobs
+SET status = 'failed',
+    last_error = sqlc.arg('last_error')::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING *;
