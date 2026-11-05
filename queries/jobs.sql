@@ -27,3 +27,28 @@ LIMIT $1 OFFSET $2;
 DELETE FROM jobs
 WHERE id = $1 AND status = 'queued'
 RETURNING *;
+
+-- name: ClaimJob :one
+UPDATE jobs
+SET status = 'running',
+    locked_at = now(),
+    locked_by = sqlc.arg('worker_id')::text,
+    attempts = attempts + 1,
+    updated_at = now()
+WHERE id = (
+    SELECT id FROM jobs
+    WHERE status = 'queued' AND run_at <= now()
+    ORDER BY run_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING *;
+
+-- name: CompleteJob :one
+UPDATE jobs
+SET status = 'succeeded',
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING *;
