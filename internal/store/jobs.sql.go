@@ -264,3 +264,110 @@ func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, erro
 	}
 	return items, nil
 }
+
+const markJobDead = `-- name: MarkJobDead :one
+UPDATE jobs
+SET status = 'dead',
+    last_error = $2::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+type MarkJobDeadParams struct {
+	ID        int64
+	LastError string
+}
+
+func (q *Queries) MarkJobDead(ctx context.Context, arg MarkJobDeadParams) (Job, error) {
+	row := q.db.QueryRow(ctx, markJobDead, arg.ID, arg.LastError)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const requeueDeadJob = `-- name: RequeueDeadJob :one
+UPDATE jobs
+SET status = 'queued',
+    attempts = 0,
+    run_at = now(),
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'dead'
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+func (q *Queries) RequeueDeadJob(ctx context.Context, id int64) (Job, error) {
+	row := q.db.QueryRow(ctx, requeueDeadJob, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const retryJob = `-- name: RetryJob :one
+UPDATE jobs
+SET status = 'queued',
+    run_at = $2::timestamptz,
+    last_error = $3::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+type RetryJobParams struct {
+	ID        int64
+	RunAt     pgtype.Timestamptz
+	LastError string
+}
+
+func (q *Queries) RetryJob(ctx context.Context, arg RetryJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, retryJob, arg.ID, arg.RunAt, arg.LastError)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

@@ -53,5 +53,6 @@ func (s *Server) registerRoutes() {
 		jobsGroup.GET("", s.ListJobsHandler)
 		jobsGroup.GET("/:id", s.GetJobByIDHandler)
 		jobsGroup.DELETE("/:id", s.CancelJobHandler)
+		jobsGroup.POST("/:id/retry", s.RequeueDeadJobHandler)
 	}
 }

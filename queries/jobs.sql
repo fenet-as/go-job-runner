@@ -62,3 +62,36 @@ SET status = 'failed',
     updated_at = now()
 WHERE id = $1 AND status = 'running'
 RETURNING *;
+
+-- name: RetryJob :one
+UPDATE jobs
+SET status = 'queued',
+    run_at = sqlc.arg('run_at')::timestamptz,
+    last_error = sqlc.arg('last_error')::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING *;
+
+-- name: MarkJobDead :one
+UPDATE jobs
+SET status = 'dead',
+    last_error = sqlc.arg('last_error')::text,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING *;
+
+-- name: RequeueDeadJob :one
+UPDATE jobs
+SET status = 'queued',
+    attempts = 0,
+    run_at = now(),
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'dead'
+RETURNING *;

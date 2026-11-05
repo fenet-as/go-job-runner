@@ -193,3 +193,37 @@ func (s *Server) CancelJobHandler(c *gin.Context) {
 		"job":     ToJobResponse(job),
 	})
 }
+
+// RequeueDeadJobHandler manually requeues a 'dead' job back to 'queued' status with reset attempts.
+func (s *Server) RequeueDeadJobHandler(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid job ID"})
+		return
+	}
+
+	job, err := s.queries.RequeueDeadJob(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Check if the job exists with a status other than 'dead'
+			existing, getErr := s.queries.GetJobByID(c.Request.Context(), id)
+			if getErr != nil {
+				c.JSON(http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("job with ID %d not found", id)})
+				return
+			}
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error: fmt.Sprintf("cannot requeue job with status '%s' (only 'dead' jobs can be requeued)", existing.Status),
+			})
+			return
+		}
+		s.logger.Error("failed to requeue dead job", "id", id, "error", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to requeue job"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "job requeued successfully",
+		"job":     ToJobResponse(job),
+	})
+}
