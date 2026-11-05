@@ -334,6 +334,62 @@ func (q *Queries) RequeueDeadJob(ctx context.Context, id int64) (Job, error) {
 	return i, err
 }
 
+const requeueStuckJobs = `-- name: RequeueStuckJobs :many
+UPDATE jobs
+SET status = 'queued',
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = 'reaped: worker heartbeat expired or crashed mid-execution',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM jobs
+    WHERE status = 'running'
+      AND locked_at < $1::timestamptz
+    ORDER BY locked_at
+    LIMIT $2::int
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+type RequeueStuckJobsParams struct {
+	Threshold pgtype.Timestamptz
+	BatchSize int32
+}
+
+func (q *Queries) RequeueStuckJobs(ctx context.Context, arg RequeueStuckJobsParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, requeueStuckJobs, arg.Threshold, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Type,
+			&i.Payload,
+			&i.Status,
+			&i.Attempts,
+			&i.MaxAttempts,
+			&i.RunAt,
+			&i.LockedAt,
+			&i.LockedBy,
+			&i.LastError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const retryJob = `-- name: RetryJob :one
 UPDATE jobs
 SET status = 'queued',

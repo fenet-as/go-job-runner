@@ -95,3 +95,20 @@ SET status = 'queued',
     updated_at = now()
 WHERE id = $1 AND status = 'dead'
 RETURNING *;
+
+-- name: RequeueStuckJobs :many
+UPDATE jobs
+SET status = 'queued',
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = 'reaped: worker heartbeat expired or crashed mid-execution',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM jobs
+    WHERE status = 'running'
+      AND locked_at < sqlc.arg('threshold')::timestamptz
+    ORDER BY locked_at
+    LIMIT sqlc.arg('batch_size')::int
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
