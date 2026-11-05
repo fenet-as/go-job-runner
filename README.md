@@ -31,9 +31,9 @@ flowchart TD
 
     subgraph Service["Job Runner Service (Go Binary)"]
         API["Gin REST API (Port 8080)"]
-        Disp["Dispatcher Goroutine<br/>(Single Poller)"]
-        Ch{{"Buffered Channel<br/>Cap: WorkerCount * 2<br/>(Backpressure)"}}
-        Reaper["Crash Reaper<br/>(Visibility Timeout Sweep)"]
+        Disp["Dispatcher Goroutine (Single Poller)"]
+        Ch{{"Buffered Channel (Backpressure Buffer)"}}
+        Reaper["Crash Reaper (Visibility Timeout Sweep)"]
         
         subgraph Pool["Worker Pool (N Goroutines)"]
             W1["Worker 0"]
@@ -43,20 +43,20 @@ flowchart TD
     end
 
     subgraph Storage["PostgreSQL 16+ Database"]
-        DB[("Table: jobs<br/>- Partial Index: jobs_ready_idx<br/>- Status: ENUM")]
+        DB[("PostgreSQL: jobs table")]
     end
 
-    Client -->|POST /jobs, GET /jobs| API
-    API -->|INSERT status='queued'| DB
-    Disp -->|ClaimJob (FOR UPDATE SKIP LOCKED)| DB
-    Disp -->|Push claimed job| Ch
-    Ch -->|Consume job| W1
-    Ch -->|Consume job| W2
-    Ch -->|Consume job| WN
-    W1 -->|CompleteJob / RetryJob / MarkJobDead| DB
-    W2 -->|CompleteJob / RetryJob / MarkJobDead| DB
-    WN -->|CompleteJob / RetryJob / MarkJobDead| DB
-    Reaper -->|RequeueStuckJobs (locked_at < threshold)| DB
+    Client -->|"POST /jobs, GET /jobs"| API
+    API -->|"INSERT status='queued'"| DB
+    Disp -->|"ClaimJob: FOR UPDATE SKIP LOCKED"| DB
+    Disp -->|"Push claimed job"| Ch
+    Ch -->|"Consume job"| W1
+    Ch -->|"Consume job"| W2
+    Ch -->|"Consume job"| WN
+    W1 -->|"CompleteJob / RetryJob / MarkJobDead"| DB
+    W2 -->|"CompleteJob / RetryJob / MarkJobDead"| DB
+    WN -->|"CompleteJob / RetryJob / MarkJobDead"| DB
+    Reaper -->|"RequeueStuckJobs: expired locked_at"| DB
 ```
 
 ---
@@ -67,7 +67,7 @@ flowchart TD
 stateDiagram-v2
     [*] --> queued: POST /jobs
 
-    queued --> running: Dispatcher Claims Job (run_at <= now())
+    queued --> running: Claimed by Dispatcher
     
     running --> succeeded: Handler returns nil
     succeeded --> [*]
@@ -78,10 +78,10 @@ stateDiagram-v2
     state Decision <<choice>>
     FailureState --> Decision
 
-    Decision --> queued: attempts < max_attempts<br/>(run_at = now() + backoff)
-    Decision --> dead: attempts >= max_attempts<br/>(Moved to Dead-Letter Queue)
+    Decision --> queued: Retries remaining (exponential backoff)
+    Decision --> dead: Attempts exhausted (moved to DLQ)
 
-    dead --> queued: POST /jobs/:id/retry<br/>(Manual operator requeue, attempts=0)
+    dead --> queued: POST /jobs/:id/retry (Manual requeue)
     queued --> [*]: DELETE /jobs/:id (Cancelled)
 ```
 
@@ -355,3 +355,4 @@ make build
 # Clean binaries
 make clean
 ```
+
