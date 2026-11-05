@@ -18,7 +18,6 @@ func TestStore_ClaimJob_Concurrent(t *testing.T) {
 	ctx := context.Background()
 	dbURL := getTestDatabaseURL()
 
-	// Use a connection pool with enough connections for concurrent workers
 	pool, err := store.NewPool(ctx, store.PoolConfig{
 		DatabaseURL: dbURL,
 		MaxConns:    15,
@@ -36,14 +35,14 @@ func TestStore_ClaimJob_Concurrent(t *testing.T) {
 	insertedIDs := make(map[int64]bool, totalJobs)
 	now := time.Now()
 
-	// 1. Enqueue 100 ready jobs
+	// 1. Enqueue 100 ready jobs with past timestamps
 	for i := 0; i < totalJobs; i++ {
 		job, err := queries.CreateJob(ctx, store.CreateJobParams{
 			Type:        "echo",
 			Payload:     []byte(fmt.Sprintf(`{"index": %d}`, i)),
 			MaxAttempts: 5,
 			RunAt: pgtype.Timestamptz{
-				Time:  now.Add(-time.Duration(totalJobs-i) * time.Second), // past run_at
+				Time:  now.Add(-time.Duration(totalJobs-i+10) * time.Second),
 				Valid: true,
 			},
 		})
@@ -66,16 +65,23 @@ func TestStore_ClaimJob_Concurrent(t *testing.T) {
 		go func(wID string) {
 			defer wg.Done()
 
+			emptyRetries := 0
 			for {
 				job, err := queries.ClaimJob(ctx, wID)
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
-						// No more queued jobs ready for claiming
-						return
+						emptyRetries++
+						if emptyRetries >= 5 {
+							// Queue is genuinely empty
+							return
+						}
+						time.Sleep(15 * time.Millisecond)
+						continue
 					}
 					t.Errorf("worker %s unexpected error: %v", wID, err)
 					return
 				}
+				emptyRetries = 0
 
 				// Check if this job was already claimed by another worker
 				if prevWorker, loaded := claimedMap.LoadOrStore(job.ID, wID); loaded {
@@ -141,7 +147,6 @@ func TestStore_ClaimJob_IgnoresFutureJobs(t *testing.T) {
 
 	queries := store.New(pool)
 
-	// Create a job scheduled 1 hour in the future
 	futureTime := time.Now().Add(1 * time.Hour)
 	futureJob, err := queries.CreateJob(ctx, store.CreateJobParams{
 		Type:        "echo",
@@ -156,11 +161,8 @@ func TestStore_ClaimJob_IgnoresFutureJobs(t *testing.T) {
 		t.Fatalf("failed to insert future job: %v", err)
 	}
 
-	// Attempting to claim should not claim the future job
-	// Clean up by deleting the test job at the end
 	defer queries.CancelJob(ctx, futureJob.ID)
 
-	// Claim with a unique worker
 	claimed, err := queries.ClaimJob(ctx, "future-tester")
 	if err == nil {
 		if claimed.ID == futureJob.ID {
@@ -186,7 +188,6 @@ func TestStore_CompleteJob(t *testing.T) {
 
 	queries := store.New(pool)
 
-	// 1. Create a ready job
 	job, err := queries.CreateJob(ctx, store.CreateJobParams{
 		Type:        "echo",
 		Payload:     []byte(`{"msg": "complete_me"}`),
@@ -200,13 +201,11 @@ func TestStore_CompleteJob(t *testing.T) {
 		t.Fatalf("failed to insert job: %v", err)
 	}
 
-	// 2. Claim it
 	claimed, err := queries.ClaimJob(ctx, "worker-finisher")
 	if err != nil {
 		t.Fatalf("failed to claim job: %v", err)
 	}
 
-	// 3. Mark completed
 	completed, err := queries.CompleteJob(ctx, claimed.ID)
 	if err != nil {
 		t.Fatalf("failed to complete job: %v", err)
