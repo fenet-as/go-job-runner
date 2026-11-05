@@ -37,6 +37,73 @@ func (q *Queries) CancelJob(ctx context.Context, id int64) (Job, error) {
 	return i, err
 }
 
+const claimJob = `-- name: ClaimJob :one
+UPDATE jobs
+SET status = 'running',
+    locked_at = now(),
+    locked_by = $1::text,
+    attempts = attempts + 1,
+    updated_at = now()
+WHERE id = (
+    SELECT id FROM jobs
+    WHERE status = 'queued' AND run_at <= now()
+    ORDER BY run_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+func (q *Queries) ClaimJob(ctx context.Context, workerID string) (Job, error) {
+	row := q.db.QueryRow(ctx, claimJob, workerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const completeJob = `-- name: CompleteJob :one
+UPDATE jobs
+SET status = 'succeeded',
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = now()
+WHERE id = $1 AND status = 'running'
+RETURNING id, type, payload, status, attempts, max_attempts, run_at, locked_at, locked_by, last_error, created_at, updated_at
+`
+
+func (q *Queries) CompleteJob(ctx context.Context, id int64) (Job, error) {
+	row := q.db.QueryRow(ctx, completeJob, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.RunAt,
+		&i.LockedAt,
+		&i.LockedBy,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     type,
