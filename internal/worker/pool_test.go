@@ -63,7 +63,7 @@ func TestWorkerPool_ExecutesJobs(t *testing.T) {
 			Payload:     []byte(fmt.Sprintf(`{"msg": "echo-%d"}`, i)),
 			MaxAttempts: 3,
 			RunAt: pgtype.Timestamptz{
-				Time:  time.Now(),
+				Time:  time.Now().Add(-5 * time.Second),
 				Valid: true,
 			},
 		})
@@ -93,7 +93,7 @@ func TestWorkerPool_ExecutesJobs(t *testing.T) {
 			if j.Status == store.JobStatusSucceeded {
 				break
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
 }
@@ -117,17 +117,18 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 	pool := worker.NewPool(worker.PoolConfig{
 		WorkerCount: 1,
 		JobTimeout:  5 * time.Second,
+		BaseBackoff: 100 * time.Millisecond,
 	}, registry, queries, logger, jobChan)
 
 	pool.Start(ctx)
 
-	// Create and claim the panicking job
+	// Create and claim the panicking job with MaxAttempts=3 (should retry)
 	_, err := queries.CreateJob(ctx, store.CreateJobParams{
 		Type:        "panic_job",
 		Payload:     []byte(`{}`),
 		MaxAttempts: 3,
 		RunAt: pgtype.Timestamptz{
-			Time:  time.Now(),
+			Time:  time.Now().Add(-5 * time.Second),
 			Valid: true,
 		},
 	})
@@ -142,25 +143,101 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 
 	jobChan <- claimed
 
-	// Wait and verify status transitions to 'failed' with panic error message
+	// Wait and verify status transitions to 'queued' for retry with future run_at
 	deadline := time.Now().Add(3 * time.Second)
 	var finalJob store.Job
 	for {
 		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for panic job to be marked failed")
+			t.Fatalf("timeout waiting for panic job to be rescheduled for retry")
 		}
 		j, err := queries.GetJobByID(ctx, claimed.ID)
 		if err != nil {
 			t.Fatalf("failed to get job: %v", err)
 		}
-		if j.Status == store.JobStatusFailed {
+		if j.Status == store.JobStatusQueued && j.LastError.Valid {
 			finalJob = j
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	if !finalJob.LastError.Valid || finalJob.LastError.String == "" {
 		t.Errorf("expected last_error to be recorded after panic")
+	}
+	if finalJob.Attempts != 1 {
+		t.Errorf("expected attempts to be 1, got %d", finalJob.Attempts)
+	}
+}
+
+func TestWorkerPool_RetriesExhausted_MovesToDead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	queries, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry := worker.NewRegistry()
+
+	// Register an always-failing handler
+	registry.Register("always_fail", func(ctx context.Context, payload []byte) error {
+		return fmt.Errorf("permanent unrecoverable failure")
+	})
+
+	jobChan := make(chan store.Job, 1)
+	pool := worker.NewPool(worker.PoolConfig{
+		WorkerCount: 1,
+		JobTimeout:  5 * time.Second,
+	}, registry, queries, logger, jobChan)
+
+	pool.Start(ctx)
+
+	// Create a job with MaxAttempts = 1 (1st attempt will exhaust all attempts)
+	_, err := queries.CreateJob(ctx, store.CreateJobParams{
+		Type:        "always_fail",
+		Payload:     []byte(`{}`),
+		MaxAttempts: 1,
+		RunAt: pgtype.Timestamptz{
+			Time:  time.Now().Add(-5 * time.Second),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimJob(ctx, "test-claimer")
+	if err != nil {
+		t.Fatalf("failed to claim job: %v", err)
+	}
+
+	jobChan <- claimed
+
+	// Wait and verify status transitions to 'dead'
+	deadline := time.Now().Add(3 * time.Second)
+	var finalJob store.Job
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for job to be marked dead")
+		}
+		j, err := queries.GetJobByID(ctx, claimed.ID)
+		if err != nil {
+			t.Fatalf("failed to get job: %v", err)
+		}
+		if j.Status == store.JobStatusDead {
+			finalJob = j
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if finalJob.Status != store.JobStatusDead {
+		t.Errorf("expected status 'dead', got '%s'", finalJob.Status)
+	}
+	if finalJob.Attempts != 1 {
+		t.Errorf("expected attempts 1, got %d", finalJob.Attempts)
+	}
+	if !finalJob.LastError.Valid || finalJob.LastError.String != "permanent unrecoverable failure" {
+		t.Errorf("expected last_error 'permanent unrecoverable failure', got %v", finalJob.LastError)
 	}
 }

@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/fenet-as/go-job-runner/internal/api"
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func getTestDatabaseURL() string {
@@ -23,7 +25,7 @@ func getTestDatabaseURL() string {
 	return "postgres://postgres@localhost:5432/jobrunner?sslmode=disable"
 }
 
-func setupTestServer(t *testing.T) (*api.Server, func()) {
+func setupTestServer(t *testing.T) (*api.Server, *store.Queries, func()) {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -37,15 +39,16 @@ func setupTestServer(t *testing.T) (*api.Server, func()) {
 	}
 
 	server := api.NewServer(pool, logger)
+	queries := store.New(pool)
 	cleanup := func() {
 		pool.Close()
 	}
 
-	return server, cleanup
+	return server, queries, cleanup
 }
 
 func TestHealthz(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	req, _ := http.NewRequest(http.MethodGet, "/healthz", nil)
@@ -66,7 +69,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestCreateJob_Success(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	payload := []byte(`{"type": "echo", "payload": {"msg": "ping"}, "max_attempts": 3}`)
@@ -100,7 +103,7 @@ func TestCreateJob_Success(t *testing.T) {
 }
 
 func TestCreateJob_UnknownType(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	payload := []byte(`{"type": "unregistered_job_type", "payload": {}}`)
@@ -116,7 +119,7 @@ func TestCreateJob_UnknownType(t *testing.T) {
 }
 
 func TestGetJobByID_SuccessAndNotFound(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	// 1. Create a job first
@@ -155,7 +158,7 @@ func TestGetJobByID_SuccessAndNotFound(t *testing.T) {
 }
 
 func TestListJobs(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	req, _ := http.NewRequest(http.MethodGet, "/jobs?limit=5&offset=0", nil)
@@ -176,7 +179,7 @@ func TestListJobs(t *testing.T) {
 }
 
 func TestCancelJob_SuccessAndAlreadyDeleted(t *testing.T) {
-	server, cleanup := setupTestServer(t)
+	server, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	// 1. Create a job
@@ -206,4 +209,86 @@ func TestCancelJob_SuccessAndAlreadyDeleted(t *testing.T) {
 	if deleteRec2.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 Not Found on second cancel, got %d", deleteRec2.Code)
 	}
+}
+
+func TestRequeueDeadJob(t *testing.T) {
+	server, queries, cleanup := setupTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 1. Create and claim a job, then mark it 'dead'
+	job, err := queries.CreateJob(ctx, store.CreateJobParams{
+		Type:        "echo",
+		Payload:     []byte(`{"test": "dlq"}`),
+		MaxAttempts: 1,
+		RunAt: pgtype.Timestamptz{
+			Time:  time.Now().Add(-5 * time.Second),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create job: %v", err)
+	}
+
+	claimed, err := queries.ClaimJob(ctx, "dlq-test")
+	if err != nil {
+		t.Fatalf("failed to claim job: %v", err)
+	}
+
+	deadJob, err := queries.MarkJobDead(ctx, store.MarkJobDeadParams{
+		ID:        claimed.ID,
+		LastError: "fatal error for dlq test",
+	})
+	if err != nil {
+		t.Fatalf("failed to mark job dead: %v", err)
+	}
+	if deadJob.Status != store.JobStatusDead {
+		t.Fatalf("expected status dead, got %s", deadJob.Status)
+	}
+
+	// 2. POST /jobs/:id/retry
+	retryReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("/jobs/%d/retry", deadJob.ID), nil)
+	retryRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(retryRec, retryReq)
+
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on requeue, got %d. Body: %s", retryRec.Code, retryRec.Body.String())
+	}
+
+	var resp struct {
+		Message string          `json:"message"`
+		Job     api.JobResponse `json:"job"`
+	}
+	if err := json.Unmarshal(retryRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode retry response: %v", err)
+	}
+
+	if resp.Job.Status != "queued" {
+		t.Errorf("expected status 'queued', got '%s'", resp.Job.Status)
+	}
+	if resp.Job.Attempts != 0 {
+		t.Errorf("expected attempts 0, got %d", resp.Job.Attempts)
+	}
+	if resp.Job.LastError != nil {
+		t.Errorf("expected last_error to be nil after requeue")
+	}
+
+	// 3. Attempting to requeue a job that is already 'queued' should return 400
+	retryReq2, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("/jobs/%d/retry", deadJob.ID), nil)
+	retryRec2 := httptest.NewRecorder()
+	server.Router().ServeHTTP(retryRec2, retryReq2)
+
+	if retryRec2.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when requeueing non-dead job, got %d", retryRec2.Code)
+	}
+
+	// 4. Attempting to requeue non-existent job should return 404
+	retryReq3, _ := http.NewRequest(http.MethodPost, "/jobs/999999999/retry", nil)
+	retryRec3 := httptest.NewRecorder()
+	server.Router().ServeHTTP(retryRec3, retryReq3)
+
+	if retryRec3.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for missing job, got %d", retryRec3.Code)
+	}
+	_ = job
 }

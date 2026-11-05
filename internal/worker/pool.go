@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// PoolConfig holds parameters for the worker pool.
+// PoolConfig holds parameters for the worker pool and retry backoff.
 type PoolConfig struct {
 	WorkerCount int
 	JobTimeout  time.Duration
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
 }
 
 // Pool manages a fixed number of worker goroutines consuming jobs from a channel.
@@ -33,6 +36,12 @@ func NewPool(cfg PoolConfig, registry *Registry, queries *store.Queries, logger 
 	}
 	if cfg.JobTimeout <= 0 {
 		cfg.JobTimeout = 30 * time.Second
+	}
+	if cfg.BaseBackoff <= 0 {
+		cfg.BaseBackoff = 1 * time.Second
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = 1 * time.Hour
 	}
 
 	return &Pool{
@@ -82,25 +91,20 @@ func (p *Pool) processJob(parentCtx context.Context, workerID string, job store.
 		slog.String("worker_id", workerID),
 		slog.Int64("job_id", job.ID),
 		slog.String("type", job.Type),
+		slog.Int("attempt", int(job.Attempts)),
+		slog.Int("max_attempts", int(job.MaxAttempts)),
 	)
 
 	// Recover from panics inside job handlers to prevent crashing the worker goroutine
 	defer func() {
 		if r := recover(); r != nil {
+			elapsed := time.Since(start)
 			p.logger.Error("panic recovered during job execution",
 				slog.String("worker_id", workerID),
 				slog.Int64("job_id", job.ID),
 				slog.Any("panic", r),
 			)
-
-			// Record failure in DB using a fresh context
-			updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			_, _ = p.queries.FailJob(updateCtx, store.FailJobParams{
-				ID:        job.ID,
-				LastError: fmt.Sprintf("panic: %v", r),
-			})
+			p.handleFailure(job, workerID, fmt.Errorf("panic: %v", r), elapsed)
 		}
 	}()
 
@@ -111,7 +115,7 @@ func (p *Pool) processJob(parentCtx context.Context, workerID string, job store.
 	handler, ok := p.registry.Get(job.Type)
 	if !ok {
 		err := ErrUnknownJobType{JobType: job.Type}
-		p.handleFailure(job.ID, workerID, err, time.Since(start))
+		p.handleFailure(job, workerID, err, time.Since(start))
 		return
 	}
 
@@ -119,7 +123,7 @@ func (p *Pool) processJob(parentCtx context.Context, workerID string, job store.
 	elapsed := time.Since(start)
 
 	if err != nil {
-		p.handleFailure(job.ID, workerID, err, elapsed)
+		p.handleFailure(job, workerID, err, elapsed)
 		return
 	}
 
@@ -146,25 +150,62 @@ func (p *Pool) handleSuccess(jobID int64, workerID string, elapsed time.Duration
 	)
 }
 
-func (p *Pool) handleFailure(jobID int64, workerID string, jobErr error, elapsed time.Duration) {
-	p.logger.Warn("job execution failed",
-		slog.Int64("job_id", jobID),
-		slog.String("worker_id", workerID),
-		slog.String("error", jobErr.Error()),
-		slog.Duration("duration", elapsed),
-	)
-
+func (p *Pool) handleFailure(job store.Job, workerID string, jobErr error, elapsed time.Duration) {
 	updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if _, err := p.queries.FailJob(updateCtx, store.FailJobParams{
-		ID:        jobID,
+	// If attempts have not reached max_attempts, reschedule for retry with exponential backoff
+	if job.Attempts < job.MaxAttempts {
+		backoff := CalculateBackoff(int(job.Attempts), p.cfg.BaseBackoff, p.cfg.MaxBackoff)
+		nextRunAt := time.Now().Add(backoff)
+
+		_, err := p.queries.RetryJob(updateCtx, store.RetryJobParams{
+			ID:        job.ID,
+			RunAt:     pgtype.Timestamptz{Time: nextRunAt, Valid: true},
+			LastError: jobErr.Error(),
+		})
+		if err != nil {
+			p.logger.Error("failed to reschedule job for retry",
+				slog.Int64("job_id", job.ID),
+				slog.String("worker_id", workerID),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+
+		p.logger.Warn("job failed, scheduled for retry",
+			slog.Int64("job_id", job.ID),
+			slog.String("worker_id", workerID),
+			slog.Int("attempt", int(job.Attempts)),
+			slog.Int("max_attempts", int(job.MaxAttempts)),
+			slog.Duration("backoff", backoff),
+			slog.Time("next_run_at", nextRunAt),
+			slog.String("error", jobErr.Error()),
+			slog.Duration("duration", elapsed),
+		)
+		return
+	}
+
+	// Attempts exhausted: transition to 'dead' (Dead-Letter Queue)
+	_, err := p.queries.MarkJobDead(updateCtx, store.MarkJobDeadParams{
+		ID:        job.ID,
 		LastError: jobErr.Error(),
-	}); err != nil {
-		p.logger.Error("failed to record job failure in database",
-			slog.Int64("job_id", jobID),
+	})
+	if err != nil {
+		p.logger.Error("failed to mark job as dead in database",
+			slog.Int64("job_id", job.ID),
 			slog.String("worker_id", workerID),
 			slog.String("error", err.Error()),
 		)
+		return
 	}
+
+	p.logger.Error("job exhausted max attempts, moved to dead-letter queue",
+		slog.Int64("job_id", job.ID),
+		slog.String("worker_id", workerID),
+		slog.Int("attempts", int(job.Attempts)),
+		slog.Int("max_attempts", int(job.MaxAttempts)),
+		slog.String("error", jobErr.Error()),
+		slog.Duration("duration", elapsed),
+	)
 }
