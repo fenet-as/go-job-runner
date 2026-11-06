@@ -14,6 +14,7 @@ import (
 	"github.com/fenet-as/go-job-runner/internal/config"
 	"github.com/fenet-as/go-job-runner/internal/queue"
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/fenet-as/go-job-runner/internal/telemetry"
 	"github.com/fenet-as/go-job-runner/internal/worker"
 )
 
@@ -71,22 +72,27 @@ func main() {
 	bufferSize := cfg.WorkerCount * 2
 	jobChan := make(chan store.Job, bufferSize)
 
-	// 5. Initialize and Start Worker Pool
+	// 5. Initialize Telemetry Tracker for Real-Time Visual Dashboard
+	tracker := telemetry.NewTracker(cfg.WorkerCount, bufferSize)
+
+	// 6. Initialize and Start Worker Pool
 	workerPool := worker.NewPool(worker.PoolConfig{
 		WorkerCount: cfg.WorkerCount,
 		JobTimeout:  30 * time.Second,
 	}, registry, queries, logger, jobChan)
+	workerPool.SetTracker(tracker)
 	workerPool.Start(ctx)
 
-	// 6. Initialize and Start Dispatcher Goroutine
+	// 7. Initialize and Start Dispatcher Goroutine
 	dispatcherCtx, cancelDispatcher := context.WithCancel(ctx)
 	dispatcher := queue.NewDispatcher(queue.DispatcherConfig{
 		PollInterval: cfg.PollInterval,
 		DispatcherID: "dispatcher-main",
 	}, queries, logger, jobChan)
+	dispatcher.SetTracker(tracker)
 	go dispatcher.Start(dispatcherCtx)
 
-	// 7. Initialize and Start Crash Reaper
+	// 8. Initialize and Start Crash Reaper
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	reaper := queue.NewReaper(queue.ReaperConfig{
 		Interval:         30 * time.Second,
@@ -95,8 +101,9 @@ func main() {
 	}, queries, logger)
 	go reaper.Start(reaperCtx)
 
-	// 8. Initialize API server
+	// 9. Initialize API server
 	server := api.NewServer(pool, logger)
+	server.SetTracker(tracker)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	httpServer := &http.Server{

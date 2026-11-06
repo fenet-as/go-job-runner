@@ -117,6 +117,9 @@ stateDiagram-v2
 
 The HTTP server will start on `http://localhost:8080`.
 
+4. **Open the Live Architecture Visualizer Dashboard:**
+   Navigate to **`http://localhost:8080/dashboard`** (or `http://localhost:8080/`) in your browser to view the real-time pipeline, worker states, channel buffer backpressure, and trigger interactive job simulations.
+
 ---
 
 ## 4. API Reference & Curl Examples
@@ -271,6 +274,13 @@ curl -i -X DELETE http://localhost:8080/jobs/42
   "job": { "id": 42, "status": "queued" }
 }
 ```
+
+---
+
+### 7. Real-Time Telemetry & SSE Endpoints
+- **Visual Dashboard UI:** `GET /dashboard` (or `GET /`)
+- **JSON Telemetry Snapshot:** `GET /api/dashboard/stats`
+- **Live Event Stream (SSE):** `GET /api/dashboard/events` (`text/event-stream`)
 
 ---
 

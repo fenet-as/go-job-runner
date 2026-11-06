@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/fenet-as/go-job-runner/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -26,6 +27,7 @@ type Pool struct {
 	queries  *store.Queries
 	logger   *slog.Logger
 	jobChan  <-chan store.Job
+	tracker  *telemetry.Tracker
 	wg       sync.WaitGroup
 }
 
@@ -51,6 +53,11 @@ func NewPool(cfg PoolConfig, registry *Registry, queries *store.Queries, logger 
 		logger:   logger,
 		jobChan:  jobChan,
 	}
+}
+
+// SetTracker registers an optional telemetry tracker for real-time dashboard visualization.
+func (p *Pool) SetTracker(tracker *telemetry.Tracker) {
+	p.tracker = tracker
 }
 
 // Start launches the worker goroutines.
@@ -87,6 +94,10 @@ func (p *Pool) Wait() {
 
 func (p *Pool) processJob(parentCtx context.Context, workerID string, job store.Job) {
 	start := time.Now()
+	if p.tracker != nil {
+		p.tracker.SetWorkerBusy(workerID, job.ID, job.Type, int(job.Attempts), int(job.MaxAttempts))
+	}
+
 	p.logger.Info("executing job",
 		slog.String("worker_id", workerID),
 		slog.Int64("job_id", job.ID),
@@ -97,6 +108,9 @@ func (p *Pool) processJob(parentCtx context.Context, workerID string, job store.
 
 	// Recover from panics inside job handlers to prevent crashing the worker goroutine
 	defer func() {
+		if p.tracker != nil {
+			p.tracker.SetWorkerIdle(workerID)
+		}
 		if r := recover(); r != nil {
 			elapsed := time.Since(start)
 			p.logger.Error("panic recovered during job execution",
@@ -148,6 +162,10 @@ func (p *Pool) handleSuccess(jobID int64, workerID string, elapsed time.Duration
 		slog.String("worker_id", workerID),
 		slog.Duration("duration", elapsed),
 	)
+
+	if p.tracker != nil {
+		p.tracker.RecordSuccess(jobID, workerID, elapsed)
+	}
 }
 
 func (p *Pool) handleFailure(job store.Job, workerID string, jobErr error, elapsed time.Duration) {
@@ -183,6 +201,10 @@ func (p *Pool) handleFailure(job store.Job, workerID string, jobErr error, elaps
 			slog.String("error", jobErr.Error()),
 			slog.Duration("duration", elapsed),
 		)
+
+		if p.tracker != nil {
+			p.tracker.RecordRetry(job.ID, workerID, int(job.Attempts), int(job.MaxAttempts), nextRunAt, jobErr.Error())
+		}
 		return
 	}
 
@@ -208,4 +230,8 @@ func (p *Pool) handleFailure(job store.Job, workerID string, jobErr error, elaps
 		slog.String("error", jobErr.Error()),
 		slog.Duration("duration", elapsed),
 	)
+
+	if p.tracker != nil {
+		p.tracker.RecordDead(job.ID, workerID, int(job.Attempts), int(job.MaxAttempts), jobErr.Error())
+	}
 }

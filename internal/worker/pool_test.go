@@ -31,7 +31,11 @@ func setupTestStore(t *testing.T) (*store.Queries, func()) {
 	if err != nil {
 		t.Fatalf("failed to connect to test db: %v", err)
 	}
-	return store.New(pool), func() { pool.Close() }
+	_, _ = pool.Exec(ctx, "DELETE FROM jobs")
+	return store.New(pool), func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM jobs")
+		pool.Close()
+	}
 }
 
 func TestWorkerPool_ExecutesJobs(t *testing.T) {
