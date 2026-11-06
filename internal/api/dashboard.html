@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Go Job Runner &mdash; Architecture Visualizer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              500: '#0284c7',
+              600: '#0369a1',
+              900: '#0c4a6e',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 15px rgba(56, 189, 248, 0.4); }
+      50% { box-shadow: 0 0 25px rgba(56, 189, 248, 0.8); }
+    }
+    .pulse-busy {
+      animation: pulse-glow 2s infinite ease-in-out;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-sky-500 selection:text-white">
+
+  <!-- Header -->
+  <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur sticky top-0 z-50 px-6 py-3.5 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-sky-500/20">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="font-bold text-lg leading-tight tracking-tight text-white flex items-center gap-2">
+          Go Job Runner
+          <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20">Live Architecture</span>
+        </h1>
+        <p class="text-xs text-slate-400">PostgreSQL &bull; Polling Dispatcher &bull; Buffered Channel &bull; Worker Pool</p>
+      </div>
+    </div>
+
+    <!-- Connection Status -->
+    <div class="flex items-center space-x-4">
+      <div id="connection-pill" class="flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <span class="relative flex h-2 w-2">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        </span>
+        <span id="connection-text">SSE Connected</span>
+      </div>
+      <a href="/jobs" target="_blank" class="text-xs text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1">
+        API Jobs List
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+      </a>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+    <!-- Top Metrics Overview -->
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Queued in DB</span>
+        <div class="flex items-baseline justify-between mt-2">
+          <span id="metric-queued" class="text-2xl font-bold text-sky-400">0</span>
+          <span class="text-[11px] text-slate-500">run_at &le; now()</span>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active In-Flight</span>
+        <div class="flex items-baseline justify-between mt-2">
+          <span id="metric-running" class="text-2xl font-bold text-amber-400">0</span>
+          <span class="text-[11px] text-slate-500">locked by workers</span>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Succeeded</span>
+        <div class="flex items-baseline justify-between mt-2">
+          <span id="metric-succeeded" class="text-2xl font-bold text-emerald-400">0</span>
+          <span class="text-[11px] text-slate-500">completed</span>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Dead-Letter Queue</span>
+        <div class="flex items-baseline justify-between mt-2">
+          <span id="metric-dead" class="text-2xl font-bold text-rose-400">0</span>
+          <span class="text-[11px] text-slate-500">retries exhausted</span>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Historical</span>
+        <div class="flex items-baseline justify-between mt-2">
+          <span id="metric-total" class="text-2xl font-bold text-indigo-400">0</span>
+          <span class="text-[11px] text-slate-500">all states</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pipeline Architecture Visualizer -->
+    <div class="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center space-x-2">
+          <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h2 class="text-base font-bold text-white tracking-tight">Internal Data Flow Pipeline</h2>
+        </div>
+        <span class="text-xs text-slate-400">PostgreSQL &rarr; SKIP LOCKED &rarr; Channel &rarr; Concurrency Fan-out</span>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 items-center">
+        <!-- Stage 1: PostgreSQL -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 relative overflow-hidden group hover:border-sky-500/50 transition-all">
+          <div class="absolute -right-3 -bottom-3 text-slate-800/30 group-hover:text-sky-500/10 transition-colors">
+            <svg class="w-20 h-20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 4.02 2 6.5s4.48 4.5 10 4.5 10-2.02 10-4.5S17.52 2 12 2zm0 6.5C8.13 8.5 5 7.6 5 6.5S8.13 4.5 12 4.5s7 0.9 7 2-3.13 2-7 2zm8 1.47c-1.85 1.05-4.74 1.73-8 1.73s-6.15-.68-8-1.73V13c0 2.48 4.48 4.5 10 4.5s10-2.02 10-4.5V9.97zm0 6.5c-1.85 1.05-4.74 1.73-8 1.73s-6.15-.68-8-1.73V19.5c0 2.48 4.48 4.5 10 4.5s10-2.02 10-4.5v-3.03z"/></svg>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-400">Stage 1</span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">Persistence</span>
+          </div>
+          <h3 class="font-bold text-slate-200 mt-2">PostgreSQL</h3>
+          <p class="text-xs text-slate-400 mt-1">Durable queue table with partial index <code class="text-sky-300 font-mono">jobs_ready_idx</code>.</p>
+          <div class="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center text-xs">
+            <span class="text-slate-400">Ready:</span>
+            <span id="pipe-pg-ready" class="font-bold text-sky-400 font-mono">0 jobs</span>
+          </div>
+        </div>
+
+        <!-- Stage 2: Dispatcher -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 relative overflow-hidden group hover:border-amber-500/50 transition-all">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-400">Stage 2</span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">Poller Goroutine</span>
+          </div>
+          <h3 class="font-bold text-slate-200 mt-2">Dispatcher</h3>
+          <p class="text-xs text-slate-400 mt-1">Atomic claim via <code class="text-amber-300 font-mono text-[11px]">FOR UPDATE SKIP LOCKED</code>.</p>
+          <div class="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center text-xs">
+            <span class="text-slate-400">Poll status:</span>
+            <span class="text-emerald-400 font-mono flex items-center gap-1.5">
+              <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span> Active
+            </span>
+          </div>
+        </div>
+
+        <!-- Stage 3: Buffered Channel -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 relative overflow-hidden group hover:border-indigo-500/50 transition-all">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-400">Stage 3</span>
+            <span id="buffer-badge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Normal</span>
+          </div>
+          <h3 class="font-bold text-slate-200 mt-2">Go Channel Buffer</h3>
+          <p class="text-xs text-slate-400 mt-1">In-memory backpressure ring buffer <code class="text-indigo-300 font-mono">jobChan</code>.</p>
+
+          <div class="mt-3 space-y-1.5">
+            <div class="flex justify-between text-xs font-mono">
+              <span class="text-slate-400">Occupancy:</span>
+              <span id="buffer-ratio" class="text-white font-bold">0 / 10</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+              <div id="buffer-progress" class="bg-indigo-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stage 4: Worker Pool -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 relative overflow-hidden group hover:border-emerald-500/50 transition-all">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-400">Stage 4</span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Worker Pool</span>
+          </div>
+          <h3 class="font-bold text-slate-200 mt-2">Parallel Execution</h3>
+          <p class="text-xs text-slate-400 mt-1">Isolated goroutines with panic recovery &amp; timeouts.</p>
+          <div class="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center text-xs">
+            <span class="text-slate-400">Utilization:</span>
+            <span id="worker-utilization" class="font-bold text-emerald-400 font-mono">0% (0 / 5)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Grid: Worker Pool Grid & Interactive Simulator -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Worker Pool Grid (2 Columns) -->
+      <div class="lg:col-span-2 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            Active Worker Goroutines
+          </h2>
+          <span class="text-xs text-slate-400 font-mono">Fixed Pool Size</span>
+        </div>
+
+        <div id="workers-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <!-- Worker cards dynamically populated -->
+        </div>
+
+        <!-- Dead Letter Queue (DLQ) Inspector -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 mt-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-bold text-rose-400 flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              Dead-Letter Queue (DLQ) Inspector
+            </h3>
+            <button onclick="fetchDLQ()" class="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 transition">
+              Refresh DLQ
+            </button>
+          </div>
+          <div class="overflow-x-auto max-h-48">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="text-slate-500 border-b border-slate-800">
+                <tr>
+                  <th class="pb-2">Job ID</th>
+                  <th class="pb-2">Type</th>
+                  <th class="pb-2">Attempts</th>
+                  <th class="pb-2">Last Error</th>
+                  <th class="pb-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody id="dlq-table-body" class="divide-y divide-slate-800/60 text-slate-300">
+                <tr>
+                  <td colspan="5" class="py-4 text-center text-slate-500">No dead jobs currently. Everything healthy!</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Simulator & Controls (1 Column) -->
+      <div class="space-y-6">
+        <!-- Interactive Trigger Panel -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-4">
+          <div class="flex items-center space-x-2">
+            <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h2 class="text-base font-bold text-white">Live Job Simulator</h2>
+          </div>
+          <p class="text-xs text-slate-400">Enqueue real test payloads into PostgreSQL to observe dispatcher polling and concurrent worker behavior in real time.</p>
+
+          <div class="grid grid-cols-2 gap-2">
+            <button onclick="triggerJob('echo', { message: 'Hello from visualizer' }, 3)" class="flex flex-col items-start p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/60 transition group text-left">
+              <span class="text-sm font-semibold text-emerald-400 flex items-center gap-1.5">
+                ⚡ Echo Job
+              </span>
+              <span class="text-[11px] text-slate-400 mt-1">Instant success</span>
+            </button>
+
+            <button onclick="triggerJob('sleep', { seconds: 5 }, 3)" class="flex flex-col items-start p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/60 transition group text-left">
+              <span class="text-sm font-semibold text-amber-400 flex items-center gap-1.5">
+                ⏳ Sleep 5s
+              </span>
+              <span class="text-[11px] text-slate-400 mt-1">Watch worker busy</span>
+            </button>
+
+            <button onclick="triggerJob('fail_randomly', { fail_percentage: 60 }, 3)" class="flex flex-col items-start p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/60 transition group text-left">
+              <span class="text-sm font-semibold text-rose-400 flex items-center gap-1.5">
+                🎲 Fail Randomly
+              </span>
+              <span class="text-[11px] text-slate-400 mt-1">Triggers backoff / DLQ</span>
+            </button>
+
+            <button onclick="triggerBurst(10)" class="flex flex-col items-start p-3 rounded-xl bg-indigo-900/40 hover:bg-indigo-800/50 border border-indigo-700/60 transition group text-left">
+              <span class="text-sm font-semibold text-indigo-300 flex items-center gap-1.5">
+                💥 Burst 10 Jobs
+              </span>
+              <span class="text-[11px] text-slate-400 mt-1">Fill buffer &amp; backpressure</span>
+            </button>
+          </div>
+
+          <!-- Custom Job Form -->
+          <div class="pt-3 border-t border-slate-800/80">
+            <button onclick="toggleCustomForm()" class="text-xs text-sky-400 hover:text-sky-300 flex items-center justify-between w-full font-semibold">
+              <span>+ Enqueue Custom Job</span>
+              <span id="custom-toggle-icon">&plus;</span>
+            </button>
+            <div id="custom-job-form" class="hidden mt-3 space-y-3">
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Job Type</label>
+                <input id="custom-type" type="text" value="sleep" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500 font-mono">
+              </div>
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Payload JSON</label>
+                <textarea id="custom-payload" rows="2" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500 font-mono">{"seconds": 3}</textarea>
+              </div>
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Max Attempts</label>
+                <input id="custom-attempts" type="number" value="3" min="1" max="10" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500 font-mono">
+              </div>
+              <button onclick="submitCustomJob()" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs py-2 rounded-lg transition shadow-md shadow-sky-600/20">
+                Submit Job to Queue
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Real-Time Event Log Terminal -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+              Live Telemetry Stream
+            </h3>
+            <button onclick="clearLogs()" class="text-[11px] text-slate-500 hover:text-slate-300">
+              Clear
+            </button>
+          </div>
+
+          <div id="events-terminal" class="bg-slate-950 border border-slate-800/80 rounded-xl p-3 h-72 overflow-y-auto font-mono text-[11px] space-y-1.5">
+            <div class="text-slate-500 italic">Listening for backend SSE events...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Client-side Logic -->
+  <script>
+    let workersState = [];
+    let timerInterval = null;
+
+    // Connect to Server-Sent Events (SSE)
+    function connectSSE() {
+      const pill = document.getElementById('connection-pill');
+      const text = document.getElementById('connection-text');
+
+      const evtSource = new EventSource('/api/dashboard/events');
+
+      evtSource.onopen = () => {
+        pill.className = "flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+        text.innerText = "SSE Connected";
+      };
+
+      evtSource.addEventListener('initial_state', (e) => {
+        try {
+          const stats = JSON.parse(e.data);
+          updateDashboard(stats);
+        } catch (err) {
+          console.error("failed to parse initial_state", err);
+        }
+      });
+
+      evtSource.addEventListener('dashboard_event', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          handleLiveEvent(ev);
+        } catch (err) {
+          console.error("failed to parse dashboard_event", err);
+        }
+      });
+
+      evtSource.onerror = (err) => {
+        pill.className = "flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20";
+        text.innerText = "Disconnected &bull; Retrying...";
+      };
+    }
+
+    // Process a single real-time event from SSE
+    function handleLiveEvent(ev) {
+      appendTerminalLog(ev);
+
+      // Buffer updates
+      if (typeof ev.buffer_len === 'number' && typeof ev.buffer_cap === 'number') {
+        updateBufferUI(ev.buffer_len, ev.buffer_cap);
+      }
+
+      // Worker status updates
+      if (ev.type === 'worker_busy' || ev.type === 'worker_idle') {
+        const w = workersState.find(w => w.id === ev.worker_id);
+        if (w) {
+          if (ev.type === 'worker_busy') {
+            w.status = 'busy';
+            w.job_id = ev.job_id;
+            w.job_type = ev.job_type;
+            w.attempt = ev.attempt;
+            w.max_attempts = ev.max_attempts;
+            w.started_at = ev.timestamp;
+          } else {
+            w.status = 'idle';
+            w.job_id = null;
+            w.job_type = '';
+            w.started_at = null;
+          }
+          renderWorkers();
+        }
+      }
+
+      // Fetch fresh DB counts on lifecycle changes
+      if (['job_dispatched', 'job_completed', 'job_retried', 'job_dead'].includes(ev.type)) {
+        refreshStatsSnapshot();
+        if (ev.type === 'job_dead') {
+          fetchDLQ();
+        }
+      }
+    }
+
+    // Refresh full stats snapshot from /api/dashboard/stats
+    async function refreshStatsSnapshot() {
+      try {
+        const res = await fetch('/api/dashboard/stats');
+        if (res.ok) {
+          const stats = await res.json();
+          updateDashboard(stats);
+        }
+      } catch (err) {
+        console.error("failed to fetch stats snapshot", err);
+      }
+    }
+
+    // Update entire dashboard UI from stats object
+    function updateDashboard(stats) {
+      if (stats.workers) {
+        workersState = stats.workers;
+        renderWorkers();
+      }
+      if (stats.buffer) {
+        updateBufferUI(stats.buffer.length, stats.buffer.capacity);
+      }
+      if (stats.db) {
+        document.getElementById('metric-queued').innerText = stats.db.queued;
+        document.getElementById('metric-running').innerText = stats.db.running;
+        document.getElementById('metric-succeeded').innerText = stats.db.succeeded;
+        document.getElementById('metric-dead').innerText = stats.db.dead;
+        document.getElementById('metric-total').innerText = stats.db.total;
+        document.getElementById('pipe-pg-ready').innerText = stats.db.queued + " jobs";
+      }
+    }
+
+    function updateBufferUI(len, cap) {
+      document.getElementById('buffer-ratio').innerText = `${len} / ${cap}`;
+      const pct = cap > 0 ? Math.min(100, Math.round((len / cap) * 100)) : 0;
+      const bar = document.getElementById('buffer-progress');
+      bar.style.width = `${pct}%`;
+
+      const badge = document.getElementById('buffer-badge');
+      if (pct >= 100) {
+        badge.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20";
+        badge.innerText = "Backpressure Active (Full)";
+        bar.className = "bg-rose-500 h-2 rounded-full transition-all duration-300";
+      } else if (pct >= 60) {
+        badge.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20";
+        badge.innerText = "High Load";
+        bar.className = "bg-amber-500 h-2 rounded-full transition-all duration-300";
+      } else {
+        badge.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20";
+        badge.innerText = "Normal";
+        bar.className = "bg-indigo-500 h-2 rounded-full transition-all duration-300";
+      }
+    }
+
+    function renderWorkers() {
+      const container = document.getElementById('workers-container');
+      if (!workersState || workersState.length === 0) return;
+
+      let busyCount = 0;
+      let html = '';
+
+      workersState.forEach(w => {
+        const isBusy = w.status === 'busy';
+        if (isBusy) busyCount++;
+
+        html += `
+          <div class="rounded-xl p-4 border transition-all ${
+            isBusy
+              ? 'bg-amber-950/20 border-amber-500/40 pulse-busy'
+              : 'bg-slate-900/50 border-slate-800'
+          }">
+            <div class="flex items-center justify-between">
+              <span class="font-mono text-xs font-semibold text-slate-300">${w.id}</span>
+              <span class="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full ${
+                isBusy
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  : 'bg-slate-800 text-slate-400'
+              }">${w.status}</span>
+            </div>
+
+            <div class="mt-3">
+              ${isBusy ? `
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="text-slate-400 font-mono">Job #${w.job_id}</span>
+                    <span class="text-amber-400 font-semibold text-[11px]">${w.job_type}</span>
+                  </div>
+                  <div class="flex items-center justify-between text-[11px] text-slate-500">
+                    <span>Attempt ${w.attempt || 1}/${w.max_attempts || 3}</span>
+                    <span class="font-mono text-amber-300" data-started="${w.started_at}">0.0s</span>
+                  </div>
+                </div>
+              ` : `
+                <div class="text-xs text-slate-500 italic py-1">Waiting for next job...</div>
+              `}
+            </div>
+          </div>
+        `;
+      });
+
+      container.innerHTML = html;
+
+      // Update worker pool utilization stat
+      const utilPct = Math.round((busyCount / workersState.length) * 100);
+      document.getElementById('worker-utilization').innerText = `${utilPct}% (${busyCount} / ${workersState.length})`;
+    }
+
+    // Real-time ticking elapsed timer for active busy workers
+    function startElapsedTimer() {
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        document.querySelectorAll('[data-started]').forEach(el => {
+          const startedStr = el.getAttribute('data-started');
+          if (startedStr) {
+            const start = new Date(startedStr).getTime();
+            const now = Date.now();
+            const elapsed = Math.max(0, (now - start) / 1000).toFixed(1);
+            el.innerText = `${elapsed}s`;
+          }
+        });
+      }, 200);
+    }
+
+    // Terminal log display
+    function appendTerminalLog(ev) {
+      const term = document.getElementById('events-terminal');
+      const timeStr = new Date(ev.timestamp || Date.now()).toLocaleTimeString();
+
+      let line = '';
+      switch (ev.type) {
+        case 'job_dispatched':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-sky-400 font-semibold">&gt; DISPATCH</span> Job #${ev.job_id} (${ev.job_type}) &rarr; channel buffer (${ev.buffer_len}/${ev.buffer_cap})`;
+          break;
+        case 'worker_busy':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-amber-400 font-semibold">&bull; RUNNING</span> ${ev.worker_id} claimed Job #${ev.job_id} (${ev.job_type}) [attempt ${ev.attempt}/${ev.max_attempts}]`;
+          break;
+        case 'worker_idle':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-slate-400">&bull; IDLE</span> ${ev.worker_id} returned to pool`;
+          break;
+        case 'job_completed':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-emerald-400 font-semibold">&check; SUCCESS</span> Job #${ev.job_id} finished in ${ev.duration_ms}ms on ${ev.worker_id}`;
+          break;
+        case 'job_retried':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-amber-500 font-semibold">&#8635; RETRY</span> Job #${ev.job_id} failed: ${ev.error || 'error'}. Attempt ${ev.attempt}/${ev.max_attempts}`;
+          break;
+        case 'job_dead':
+          line = `<span class="text-slate-500">[${timeStr}]</span> <span class="text-rose-400 font-semibold">&cross; DLQ DEAD</span> Job #${ev.job_id} exhausted retries &rarr; DLQ: ${ev.error}`;
+          break;
+        default:
+          line = `<span class="text-slate-500">[${timeStr}]</span> ${ev.type}: ${JSON.stringify(ev)}`;
+      }
+
+      const row = document.createElement('div');
+      row.innerHTML = line;
+      term.appendChild(row);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function clearLogs() {
+      document.getElementById('events-terminal').innerHTML = '<div class="text-slate-500 italic">Log cleared. Listening for events...</div>';
+    }
+
+    // Trigger standard simulator jobs
+    async function triggerJob(type, payload, maxAttempts) {
+      try {
+        const res = await fetch('/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: type,
+            payload: payload,
+            max_attempts: maxAttempts
+          })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          alert(`Error enqueuing job: ${JSON.stringify(err)}`);
+        }
+      } catch (err) {
+        alert(`Request failed: ${err}`);
+      }
+    }
+
+    // Trigger burst of 10 jobs to test channel backpressure
+    async function triggerBurst(count) {
+      for (let i = 0; i < count; i++) {
+        // Mix of fast and slower jobs
+        const isSleep = i % 3 === 0;
+        const jobType = isSleep ? 'sleep' : 'echo';
+        const payload = isSleep ? { seconds: 2.5 } : { message: `burst-${i}` };
+        triggerJob(jobType, payload, 3);
+      }
+    }
+
+    // Custom Job Form Toggle & Submission
+    function toggleCustomForm() {
+      const f = document.getElementById('custom-job-form');
+      const icon = document.getElementById('custom-toggle-icon');
+      if (f.classList.contains('hidden')) {
+        f.classList.remove('hidden');
+        icon.innerHTML = '&minus;';
+      } else {
+        f.classList.add('hidden');
+        icon.innerHTML = '&plus;';
+      }
+    }
+
+    async function submitCustomJob() {
+      const type = document.getElementById('custom-type').value.trim();
+      const payloadStr = document.getElementById('custom-payload').value.trim();
+      const attempts = parseInt(document.getElementById('custom-attempts').value, 10) || 3;
+
+      let payload = {};
+      try {
+        if (payloadStr) payload = JSON.parse(payloadStr);
+      } catch (e) {
+        alert("Invalid JSON payload");
+        return;
+      }
+
+      await triggerJob(type, payload, attempts);
+      toggleCustomForm();
+    }
+
+    // Dead-Letter Queue (DLQ) Inspector & Retry
+    async function fetchDLQ() {
+      try {
+        const res = await fetch('/jobs?status=dead&limit=20');
+        if (res.ok) {
+          const jobs = await res.json();
+          renderDLQ(jobs);
+        }
+      } catch (err) {
+        console.error("failed to fetch DLQ jobs", err);
+      }
+    }
+
+    function renderDLQ(jobs) {
+      const tbody = document.getElementById('dlq-table-body');
+      if (!jobs || jobs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" class="py-4 text-center text-slate-500">No dead jobs currently. Everything healthy!</td></tr>`;
+        return;
+      }
+
+      let html = '';
+      jobs.forEach(j => {
+        const lastErr = j.last_error || 'Unknown error';
+        html += `
+          <tr class="hover:bg-slate-800/40 transition">
+            <td class="py-2.5 font-bold text-rose-400">#${j.id}</td>
+            <td class="py-2.5">${j.type}</td>
+            <td class="py-2.5 text-slate-400">${j.attempts}/${j.max_attempts}</td>
+            <td class="py-2.5 max-w-xs truncate text-slate-400" title="${lastErr}">${lastErr}</td>
+            <td class="py-2.5 text-right">
+              <button onclick="requeueJob(${j.id})" class="px-2 py-1 rounded text-[11px] bg-sky-600 hover:bg-sky-500 text-white font-sans transition">
+                Retry Now
+              </button>
+            </td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+
+    async function requeueJob(jobID) {
+      try {
+        const res = await fetch(`/jobs/${jobID}/retry`, { method: 'POST' });
+        if (res.ok) {
+          fetchDLQ();
+          refreshStatsSnapshot();
+        } else {
+          alert("Failed to requeue job");
+        }
+      } catch (err) {
+        alert(`Error requeueing: ${err}`);
+      }
+    }
+
+    // Initialize on page load
+    window.addEventListener('DOMContentLoaded', () => {
+      connectSSE();
+      startElapsedTimer();
+      refreshStatsSnapshot();
+      fetchDLQ();
+
+      // Poll stats every 3s as fallback to keep DB counts fresh
+      setInterval(refreshStatsSnapshot, 3000);
+    });
+  </script>
+</body>
+</html>

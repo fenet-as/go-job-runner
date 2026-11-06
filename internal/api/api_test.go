@@ -15,6 +15,7 @@ import (
 
 	"github.com/fenet-as/go-job-runner/internal/api"
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/fenet-as/go-job-runner/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -291,4 +292,53 @@ func TestRequeueDeadJob(t *testing.T) {
 		t.Fatalf("expected 404 Not Found for missing job, got %d", retryRec3.Code)
 	}
 	_ = job
+}
+
+func TestDashboard_ServesHTML(t *testing.T) {
+	server, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	for _, path := range []string{"/", "/dashboard"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		server.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("path %s returned code %d, expected 200", path, rec.Code)
+		}
+		if contentType := rec.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+			t.Errorf("expected text/html; charset=utf-8, got %s", contentType)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte("Go Job Runner")) {
+			t.Errorf("expected HTML body to contain 'Go Job Runner'")
+		}
+	}
+}
+
+func TestDashboard_StatsEndpoint(t *testing.T) {
+	server, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	tracker := telemetry.NewTracker(3, 6)
+	server.SetTracker(tracker)
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/dashboard/stats", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	var stats telemetry.DashboardStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("failed to decode dashboard stats JSON: %v", err)
+	}
+
+	if len(stats.Workers) != 3 {
+		t.Errorf("expected 3 workers, got %d", len(stats.Workers))
+	}
+	if stats.Buffer.Capacity != 6 {
+		t.Errorf("expected buffer capacity 6, got %d", stats.Buffer.Capacity)
+	}
 }

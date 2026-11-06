@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fenet-as/go-job-runner/internal/store"
+	"github.com/fenet-as/go-job-runner/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -22,6 +23,7 @@ type Dispatcher struct {
 	queries *store.Queries
 	logger  *slog.Logger
 	jobChan chan<- store.Job
+	tracker *telemetry.Tracker
 }
 
 // NewDispatcher creates a new Dispatcher instance.
@@ -39,6 +41,11 @@ func NewDispatcher(cfg DispatcherConfig, queries *store.Queries, logger *slog.Lo
 		logger:  logger,
 		jobChan: jobChan,
 	}
+}
+
+// SetTracker registers an optional telemetry tracker for real-time dashboard updates.
+func (d *Dispatcher) SetTracker(tracker *telemetry.Tracker) {
+	d.tracker = tracker
 }
 
 // Start runs the polling loop until the given context is canceled.
@@ -88,6 +95,9 @@ func (d *Dispatcher) Start(ctx context.Context) {
 		select {
 		case d.jobChan <- job:
 			d.logger.Debug("dispatched job to channel", slog.Int64("job_id", job.ID), slog.String("type", job.Type))
+			if d.tracker != nil {
+				d.tracker.RecordDispatch(job.ID, job.Type, len(d.jobChan), cap(d.jobChan))
+			}
 		case <-ctx.Done():
 			d.logger.Warn("dispatcher context canceled while holding claimed job", slog.Int64("job_id", job.ID))
 			return
